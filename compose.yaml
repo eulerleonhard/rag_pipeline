@@ -1,0 +1,97 @@
+version: '3'
+
+services:
+
+  hadoop-namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-namenode
+    ports:
+      - "9870:9870"  # HDFS Web UI
+      - "9000:9000"  # HDFS RPC
+    environment:
+      - CLUSTER_NAME=test
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+      - HDFS_NAMENODE_RPC_BIND_HOST=0.0.0.0
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+
+  hadoop-datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: hadoop-datanode
+    depends_on:
+      - hadoop-namenode
+    environment:
+      - CLUSTER_NAME=test
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+
+  spark-master:
+    image: bitnami/spark:3.5.0
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+    ports:
+      - "7077:7077"  # Spark master
+      - "8080:8080"  # Spark UI
+
+  spark-worker:
+    image: bitnami/spark:3.5.0
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+    depends_on:
+      - spark-master
+
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: jupyter
+    ports:
+      - "8899:8888"
+    environment:
+      - PYSPARK_PYTHON=python3
+      - PYSPARK_DRIVER_PYTHON=jupyter
+      - PYSPARK_DRIVER_PYTHON_OPTS=notebook
+      - SPARK_MASTER=spark://spark-master:7077
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+      - SPARK_HOME=/usr/local/spark
+      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 pyspark-shell
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/hdfs_data
+    depends_on:
+      - spark-master
+      - hadoop-namenode
+
+  hdfs-uploader:
+    build:
+      context: ./hdfs-uploader
+    container_name: hdfs-uploader
+    volumes:
+      - ./data:/hdfs_data
+    depends_on:
+      - hadoop-namenode
+    environment:
+      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+      - HADOOP_USER_NAME=root
+
+  fastapi-uploader:
+    build: ./fastapi-uploader
+    container_name: fastapi-uploader
+    volumes:
+      - ./fastapi-uploader:/app
+      - ./data:/hdfs_data
+    depends_on:
+      - hadoop-namenode
+    environment:
+      - WEBHDFS_URL=http://hadoop-namenode:9870
+    ports:
+      - "8000:8000"
+
+
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:

@@ -14,6 +14,8 @@ services:
       - HDFS_NAMENODE_RPC_BIND_HOST=0.0.0.0
     volumes:
       - hadoop_namenode:/hadoop/dfs/name
+    networks:
+      - rag-net
 
   hadoop-datanode:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
@@ -25,25 +27,37 @@ services:
       - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
     volumes:
       - hadoop_datanode:/hadoop/dfs/data
+    networks:
+      - rag-net
 
   spark-master:
-    image: bitnami/spark:3.5.0
+    build: ./spark-jobs
     container_name: spark-master
     environment:
       - SPARK_MODE=master
       - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
     ports:
-      - "7077:7077"  # Spark master
-      - "8080:8080"  # Spark UI
+      - "7077:7077"  # Spark master port
+      - "8080:8080"  # Spark Web UI
+    volumes:
+      - ./tmp:/tmp
+      - ./spark-jobs:/spark-jobs
+    networks:
+      - rag-net
 
   spark-worker:
-    image: bitnami/spark:3.5.0
+    build: ./spark-jobs
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
       - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
     depends_on:
       - spark-master
+    volumes:
+      - ./tmp:/tmp
+      - ./spark-jobs:/spark-jobs
+    networks:
+      - rag-net
 
   jupyter:
     image: jupyter/pyspark-notebook:spark-3.5.0
@@ -64,10 +78,11 @@ services:
     depends_on:
       - spark-master
       - hadoop-namenode
+    networks:
+      - rag-net
 
   hdfs-uploader:
-    build:
-      context: ./hdfs-uploader
+    build: ./hdfs-uploader
     container_name: hdfs-uploader
     volumes:
       - ./data:/hdfs_data
@@ -76,6 +91,8 @@ services:
     environment:
       - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
       - HADOOP_USER_NAME=root
+    networks:
+      - rag-net
 
   fastapi-uploader:
     build: ./fastapi-uploader
@@ -89,9 +106,26 @@ services:
       - WEBHDFS_URL=http://hadoop-namenode:9870
     ports:
       - "8000:8000"
+    networks:
+      - rag-net
 
-
+  embedding-api:
+    build: ./embedding-api
+    container_name: embedding-api
+    ports:
+      - "9001:9000"
+    environment:
+      - TRANSFORMERS_HTTP_TIMEOUT=60
+      - TRANSFORMERS_CACHE=/app/cache
+    volumes:
+      - huggingface_cache:/app/cache
+    networks:
+      - rag-net
 
 volumes:
   hadoop_namenode:
   hadoop_datanode:
+  huggingface_cache:
+
+networks:
+  rag-net:

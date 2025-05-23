@@ -10,6 +10,8 @@ done
 echo "[Uploader] HDFS is ready. Syncing files from /hdfs_data to HDFS at /data/..."
 
 hdfs dfs -mkdir -p /data
+hdfs dfs -mkdir -p /user/spark/embeddings
+hdfs dfs -chown -R spark:spark /user/spark
 
 for file in /hdfs_data/*; do
     if [ -f "$file" ]; then

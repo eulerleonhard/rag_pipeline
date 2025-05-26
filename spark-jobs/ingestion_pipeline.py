@@ -1,96 +1,112 @@
-from py4j.java_gateway import java_import
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, col
-from pyspark.sql.types import ArrayType, FloatType
-import fitz  # PyMuPDF
+from pyspark.sql.functions import pandas_udf, col, lit
+from pyspark.sql.types import ArrayType, FloatType, StringType, StructType, StructField
 import pandas as pd
-import os
-import requests
+import fitz  # PyMuPDF
 import io
+import requests
+import logging
 
-# HDFS paths
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("IngestionPipeline")
+
+# Constants
 HDFS_INPUT_PATH = "hdfs:///data"
 HDFS_OUTPUT_PATH = "hdfs://hadoop-namenode:9000/user/spark/embeddings"
 EMBEDDING_API_URL = "http://embedding-api:9000/embed"
 
-# 1. Spark session
+# Spark session
 spark = SparkSession.builder \
     .appName("IngestionPipeline") \
     .config("spark.sql.execution.arrow.pyspark.enabled", "true") \
     .config("spark.hadoop.fs.defaultFS", "hdfs://hadoop-namenode:9000") \
     .getOrCreate()
 
-# 2. HDFS FileSystem handle
-sc = spark.sparkContext
-java_import(sc._jvm, "org.apache.hadoop.fs.Path")
-hadoop_conf = sc._jsc.hadoopConfiguration()
-hadoop_conf.set("fs.defaultFS", "hdfs://hadoop-namenode:9000")
-fs = sc._jvm.org.apache.hadoop.fs.FileSystem.get(hadoop_conf)
-input_path = sc._jvm.Path(HDFS_INPUT_PATH)
-output_path = sc._jvm.Path(HDFS_OUTPUT_PATH)
+# -----------------------------------------------------------
+# 1. Read PDFs using binaryFile API
+# -----------------------------------------------------------
+log.info("📄 Reading PDFs from HDFS...")
+pdf_df = spark.read.format("binaryFile") \
+    .load(HDFS_INPUT_PATH + "/*.pdf") \
+    .select("path", "content")
 
-# Create output directory if it doesn't exist
-if not fs.exists(output_path):
-    fs.mkdirs(output_path)
+@pandas_udf(StringType())
+def extract_pdf_text_udf(content: pd.Series) -> pd.Series:
+    results = []
+    for binary in content:
+        try:
+            with io.BytesIO(binary) as pdf_file:
+                doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
+                text = "\n".join(page.get_text("text") for page in doc)
+                results.append(text)
+        except Exception as e:
+            log.error(f"PDF parsing error: {e}")
+            results.append("")
+    return pd.Series(results)
 
-# 3. List files
-files = fs.listStatus(input_path)
-documents = []
+pdf_text_df = pdf_df.withColumn("content", extract_pdf_text_udf(col("content"))) \
+    .withColumnRenamed("path", "source")
 
-# 4. Process files
-for f in files:
-    file_path = f.getPath().toString()
-    file_name = os.path.basename(file_path)
+# -----------------------------------------------------------
+# 2. Read CSVs with schema and preview sample
+# -----------------------------------------------------------
+log.info("📊 Reading CSVs from HDFS...")
+csv_paths = [row.path for row in spark._jvm.org.apache.hadoop.fs.FileSystem \
+             .get(spark._jsc.hadoopConfiguration()) \
+             .listStatus(spark._jvm.org.apache.hadoop.fs.Path(HDFS_INPUT_PATH))
+             if row.getPath().getName().endswith(".csv")]
 
-    if file_name.endswith(".pdf"):
-        pdf_stream = fs.open(f.getPath())
-        pdf_bytes = pdf_stream.readAllBytes()
-        pdf_stream.close()
-
-        with io.BytesIO(pdf_bytes) as pdf_file:
-            doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-            full_text = ""
-            for page in doc:
-                blocks = page.get_text("blocks")
-                blocks_text = "\n".join([b[4] for b in blocks if isinstance(b[4], str)])
-                full_text += blocks_text + "\n"
-            documents.append({"content": full_text, "source": file_name})
-
-    elif file_name.endswith(".csv"):
+csv_docs = []
+for path in csv_paths:
+    file_path = path.toString()
+    file_name = file_path.split("/")[-1]
+    try:
         df = spark.read.option("header", True).csv(file_path)
-        schema = str(df.schema)
-        sample = df.limit(5).toPandas().to_string(index=False)
-        documents.append({
-            "content": f"Schema:\n{schema}\n\nSample:\n{sample}",
+        schema_str = df.schema.simpleString()
+        sample = df.limit(5).toPandas().to_markdown(index=False)
+        csv_docs.append({
+            "content": f"Schema: {schema_str}\n\nSample:\n{sample}",
             "source": file_name
         })
+    except Exception as e:
+        log.error(f"CSV error {file_name}: {e}")
 
-# 5. Create Spark DataFrame
-df = spark.createDataFrame(documents)
+csv_text_df = spark.createDataFrame(csv_docs, schema=StructType([
+    StructField("content", StringType(), True),
+    StructField("source", StringType(), True),
+]))
 
-# 6. Pandas UDF to call embedding service
+# -----------------------------------------------------------
+# 3. Combine PDF and CSV docs
+# -----------------------------------------------------------
+log.info("🔗 Combining PDF and CSV documents...")
+doc_df = pdf_text_df.select("content", "source").unionByName(csv_text_df)
+
+# -----------------------------------------------------------
+# 4. Embedding using REST API
+# -----------------------------------------------------------
 @pandas_udf(ArrayType(FloatType()))
 def embed_batch_udf(texts: pd.Series) -> pd.Series:
-    embeddings = []
-    for text in texts:
-        try:
-            res = requests.post(EMBEDDING_API_URL, json={"texts": [text]})
-            if res.status_code == 200:
-                embedding = res.json().get("embeddings", [[]])[0]
-                print("✅ Embedded:", embedding[:5], "...")  # short preview
-                embeddings.append(embedding)
-            else:
-                print("❌ Status code:", res.status_code)
-                embeddings.append([])
-        except Exception as e:
-            print("🚨 Exception during embedding:", e)
-            embeddings.append([])
-    return pd.Series(embeddings)
+    batch = texts.tolist()
+    try:
+        res = requests.post(EMBEDDING_API_URL, json={"texts": batch})
+        if res.status_code == 200:
+            return pd.Series(res.json().get("embeddings", [[] for _ in batch]))
+        else:
+            log.error(f"Embedding API error: {res.status_code}")
+            return pd.Series([[] for _ in batch])
+    except Exception as e:
+        log.error(f"Embedding exception: {e}")
+        return pd.Series([[] for _ in batch])
 
+log.info("🧠 Generating embeddings...")
+df_emb = doc_df.withColumn("embedding", embed_batch_udf(col("content")))
 
-# 7. Apply embedding UDF
-df_emb = df.withColumn("embedding", embed_batch_udf(col("content")))
-
-# 8. Write output
+# -----------------------------------------------------------
+# 5. Write to HDFS as Parquet
+# -----------------------------------------------------------
+log.info(f"💾 Writing embeddings to HDFS: {HDFS_OUTPUT_PATH}")
 df_emb.write.mode("overwrite").parquet(HDFS_OUTPUT_PATH)
-print("✅ Ingestion complete. Output at:", HDFS_OUTPUT_PATH)
+
+log.info("✅ Ingestion complete.")

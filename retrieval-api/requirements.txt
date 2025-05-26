@@ -1,0 +1,8 @@
+requests
+fastapi
+uvicorn
+faiss-cpu
+numpy
+pandas
+pydantic
+pyarrow

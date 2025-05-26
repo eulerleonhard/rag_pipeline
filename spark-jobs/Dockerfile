@@ -10,6 +10,7 @@ RUN apt-get update && \
         pandas \
         pyarrow \
         PyMuPDF \
-        requests
+        requests \
+        faiss-cpu
 
 USER 1001

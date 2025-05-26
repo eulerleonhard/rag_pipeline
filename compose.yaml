@@ -1,12 +1,10 @@
-version: '3'
-
 services:
 
   hadoop-namenode:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: hadoop-namenode
     ports:
-      - "9870:9870"  # HDFS Web UI
+      - "9870:9870"  # HDFS UI
       - "9000:9000"  # HDFS RPC
     environment:
       - CLUSTER_NAME=test
@@ -37,16 +35,23 @@ services:
       - SPARK_MODE=master
       - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
     ports:
-      - "7077:7077"  # Spark master port
-      - "8080:8080"  # Spark Web UI
+      - "7077:7077"  # Spark master communication
+      - "8080:8080"  # Spark master web UI
     volumes:
-      - ./tmp:/tmp
+      # - ./tmp:/tmp
       - ./spark-jobs:/spark-jobs
+      - ./retrieval-api/faiss_index:/app/faiss_index
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 1g
     networks:
       - rag-net
 
   spark-worker:
     build: ./spark-jobs
+    container_name: spark-worker
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
@@ -54,8 +59,15 @@ services:
     depends_on:
       - spark-master
     volumes:
-      - ./tmp:/tmp
       - ./spark-jobs:/spark-jobs
+      - ./retrieval-api/faiss_index:/app/faiss_index
+    ports:
+      - "8081:8081"  # Optional: Spark worker UI
+    # deploy:
+    #   resources:
+    #     limits:
+    #       cpus: '1.0'
+    #       memory: 1g
     networks:
       - rag-net
 
@@ -63,7 +75,8 @@ services:
     image: jupyter/pyspark-notebook:spark-3.5.0
     container_name: jupyter
     ports:
-      - "8899:8888"
+      - "8899:8888"  # Jupyter UI
+      - "4040:4040"  # Spark driver UI (from notebooks)
     environment:
       - PYSPARK_PYTHON=python3
       - PYSPARK_DRIVER_PYTHON=jupyter
@@ -71,7 +84,7 @@ services:
       - SPARK_MASTER=spark://spark-master:7077
       - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
       - SPARK_HOME=/usr/local/spark
-      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 pyspark-shell
+      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --conf spark.ui.port=4040 pyspark-shell
     volumes:
       - ./notebooks:/home/jovyan/work
       - ./data:/hdfs_data
@@ -97,6 +110,8 @@ services:
   fastapi-uploader:
     build: ./fastapi-uploader
     container_name: fastapi-uploader
+    ports:
+      - "8000:8000"
     volumes:
       - ./fastapi-uploader:/app
       - ./data:/hdfs_data
@@ -104,8 +119,6 @@ services:
       - hadoop-namenode
     environment:
       - WEBHDFS_URL=http://hadoop-namenode:9870
-    ports:
-      - "8000:8000"
     networks:
       - rag-net
 
@@ -122,10 +135,21 @@ services:
     networks:
       - rag-net
 
+  retrieval-api:
+    build: ./retrieval-api
+    container_name: retrieval-api
+    ports:
+      - "9002:9000"
+    volumes:
+      - ./retrieval-api/faiss_index:/faiss
+    networks:
+      - rag-net
+
 volumes:
   hadoop_namenode:
   hadoop_datanode:
   huggingface_cache:
+  faiss-data:
 
 networks:
   rag-net:

@@ -1,9 +1,10 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, col, lit
-from pyspark.sql.types import ArrayType, FloatType, StringType, StructType, StructField
+from pyspark.sql.functions import pandas_udf, col, explode, monotonically_increasing_id
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType, FloatType
 import pandas as pd
 import fitz  # PyMuPDF
 import io
+import uuid
 import requests
 import logging
 
@@ -24,67 +25,59 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 # -----------------------------------------------------------
-# 1. Read PDFs using binaryFile API
+# 1. Read PDFs from HDFS
 # -----------------------------------------------------------
 log.info("📄 Reading PDFs from HDFS...")
 pdf_df = spark.read.format("binaryFile") \
     .load(HDFS_INPUT_PATH + "/*.pdf") \
     .select("path", "content")
 
-@pandas_udf(StringType())
-def extract_pdf_text_udf(content: pd.Series) -> pd.Series:
-    results = []
-    for binary in content:
+# -----------------------------------------------------------
+# 2. Extract and chunk PDF text
+# -----------------------------------------------------------
+@pandas_udf(ArrayType(StructType([
+    StructField("chunk_id", StringType()),
+    StructField("source", StringType()),
+    StructField("page_num", IntegerType()),
+    StructField("chunk_index", IntegerType()),
+    StructField("content", StringType())
+])))
+def extract_chunks_udf(contents: pd.Series, paths: pd.Series) -> pd.Series:
+    all_chunks = []
+    for binary, path in zip(contents, paths):
+        chunks = []
         try:
             with io.BytesIO(binary) as pdf_file:
                 doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
-                text = "\n".join(page.get_text("text") for page in doc)
-                results.append(text)
+                for page_num, page in enumerate(doc, start=1):
+                    text = page.get_text("text")
+                    split_chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
+                    for i, chunk in enumerate(split_chunks):
+                        chunks.append({
+                            "chunk_id": str(uuid.uuid4()),
+                            "source": path.split("/")[-1],
+                            "page_num": page_num,
+                            "chunk_index": i,
+                            "content": chunk
+                        })
         except Exception as e:
-            log.error(f"PDF parsing error: {e}")
-            results.append("")
-    return pd.Series(results)
+            log.error(f"Failed to parse PDF: {e}")
+        all_chunks.append(chunks)
+    return pd.Series(all_chunks)
 
-pdf_text_df = pdf_df.withColumn("content", extract_pdf_text_udf(col("content"))) \
-    .withColumnRenamed("path", "source")
-
-# -----------------------------------------------------------
-# 2. Read CSVs with schema and preview sample
-# -----------------------------------------------------------
-log.info("📊 Reading CSVs from HDFS...")
-csv_paths = [row.path for row in spark._jvm.org.apache.hadoop.fs.FileSystem \
-             .get(spark._jsc.hadoopConfiguration()) \
-             .listStatus(spark._jvm.org.apache.hadoop.fs.Path(HDFS_INPUT_PATH))
-             if row.getPath().getName().endswith(".csv")]
-
-csv_docs = []
-for path in csv_paths:
-    file_path = path.toString()
-    file_name = file_path.split("/")[-1]
-    try:
-        df = spark.read.option("header", True).csv(file_path)
-        schema_str = df.schema.simpleString()
-        sample = df.limit(5).toPandas().to_markdown(index=False)
-        csv_docs.append({
-            "content": f"Schema: {schema_str}\n\nSample:\n{sample}",
-            "source": file_name
-        })
-    except Exception as e:
-        log.error(f"CSV error {file_name}: {e}")
-
-csv_text_df = spark.createDataFrame(csv_docs, schema=StructType([
-    StructField("content", StringType(), True),
-    StructField("source", StringType(), True),
-]))
+log.info("✂️ Extracting and chunking PDF content...")
+chunked_df = pdf_df.withColumn("chunks", extract_chunks_udf(col("content"), col("path"))) \
+    .select(explode(col("chunks")).alias("chunk")) \
+    .select(
+        col("chunk.chunk_id"),
+        col("chunk.source"),
+        col("chunk.page_num"),
+        col("chunk.chunk_index"),
+        col("chunk.content")
+    )
 
 # -----------------------------------------------------------
-# 3. Combine PDF and CSV docs
-# -----------------------------------------------------------
-log.info("🔗 Combining PDF and CSV documents...")
-doc_df = pdf_text_df.select("content", "source").unionByName(csv_text_df)
-
-# -----------------------------------------------------------
-# 4. Embedding using REST API
+# 3. Embedding using external API
 # -----------------------------------------------------------
 @pandas_udf(ArrayType(FloatType()))
 def embed_batch_udf(texts: pd.Series) -> pd.Series:
@@ -97,16 +90,16 @@ def embed_batch_udf(texts: pd.Series) -> pd.Series:
             log.error(f"Embedding API error: {res.status_code}")
             return pd.Series([[] for _ in batch])
     except Exception as e:
-        log.error(f"Embedding exception: {e}")
+        log.error(f"Embedding request failed: {e}")
         return pd.Series([[] for _ in batch])
 
-log.info("🧠 Generating embeddings...")
-df_emb = doc_df.withColumn("embedding", embed_batch_udf(col("content")))
+log.info("🧠 Generating embeddings for text chunks...")
+df_emb = chunked_df.withColumn("embedding", embed_batch_udf(col("content")))
 
 # -----------------------------------------------------------
-# 5. Write to HDFS as Parquet
+# 4. Write to HDFS
 # -----------------------------------------------------------
-log.info(f"💾 Writing embeddings to HDFS: {HDFS_OUTPUT_PATH}")
+log.info(f"💾 Writing enriched embeddings to HDFS: {HDFS_OUTPUT_PATH}")
 df_emb.write.mode("overwrite").parquet(HDFS_OUTPUT_PATH)
 
-log.info("✅ Ingestion complete.")
+log.info("✅ Ingestion pipeline complete.")

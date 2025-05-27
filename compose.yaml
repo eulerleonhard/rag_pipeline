@@ -71,28 +71,28 @@ services:
     networks:
       - rag-net
 
-  jupyter:
-    image: jupyter/pyspark-notebook:spark-3.5.0
-    container_name: jupyter
-    ports:
-      - "8899:8888"  # Jupyter UI
-      - "4040:4040"  # Spark driver UI (from notebooks)
-    environment:
-      - PYSPARK_PYTHON=python3
-      - PYSPARK_DRIVER_PYTHON=jupyter
-      - PYSPARK_DRIVER_PYTHON_OPTS=notebook
-      - SPARK_MASTER=spark://spark-master:7077
-      - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
-      - SPARK_HOME=/usr/local/spark
-      - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --conf spark.ui.port=4040 pyspark-shell
-    volumes:
-      - ./notebooks:/home/jovyan/work
-      - ./data:/hdfs_data
-    depends_on:
-      - spark-master
-      - hadoop-namenode
-    networks:
-      - rag-net
+  # jupyter:
+  #   image: jupyter/pyspark-notebook:spark-3.5.0
+  #   container_name: jupyter
+  #   ports:
+  #     - "8899:8888"  # Jupyter UI
+  #     - "4040:4040"  # Spark driver UI (from notebooks)
+  #   environment:
+  #     - PYSPARK_PYTHON=python3
+  #     - PYSPARK_DRIVER_PYTHON=jupyter
+  #     - PYSPARK_DRIVER_PYTHON_OPTS=notebook
+  #     - SPARK_MASTER=spark://spark-master:7077
+  #     - CORE_CONF_fs_defaultFS=hdfs://hadoop-namenode:9000
+  #     - SPARK_HOME=/usr/local/spark
+  #     - PYSPARK_SUBMIT_ARGS=--master spark://spark-master:7077 --conf spark.ui.port=4040 pyspark-shell
+  #   volumes:
+  #     - ./notebooks:/home/jovyan/work
+  #     - ./data:/hdfs_data
+  #   depends_on:
+  #     - spark-master
+  #     - hadoop-namenode
+  #   networks:
+  #     - rag-net
 
   hdfs-uploader:
     build: ./hdfs-uploader
@@ -145,11 +145,36 @@ services:
     networks:
       - rag-net
 
+  llm-api:
+    build: ./llm-api
+    container_name: llm-api
+    ports:
+      - "9003:9000"
+    environment:
+      - TRANSFORMERS_CACHE=/app/cache
+    volumes:
+      - huggingface_cache:/app/cache
+    networks:
+      - rag-net
+
+  # ui:
+  #   build: ./ui
+  #   container_name: rag-ui
+  #   ports:
+  #     - "8501:8501"  # Assuming Gradio/Streamlit
+  #   environment:
+  #     - RETRIEVAL_API_URL=http://retrieval-api:9000
+  #   depends_on:
+  #     - retrieval-api
+  #   networks:
+  #     - rag-net
+  
+
 volumes:
   hadoop_namenode:
   hadoop_datanode:
   huggingface_cache:
-  faiss-data:
+  # faiss-data:
 
 networks:
   rag-net:

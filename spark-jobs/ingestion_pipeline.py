@@ -1,5 +1,5 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, col, explode, monotonically_increasing_id
+from pyspark.sql.functions import pandas_udf, col, explode
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType, FloatType
 import pandas as pd
 import fitz  # PyMuPDF
@@ -17,6 +17,10 @@ HDFS_INPUT_PATH = "hdfs:///data"
 HDFS_OUTPUT_PATH = "hdfs://hadoop-namenode:9000/user/spark/embeddings"
 EMBEDDING_API_URL = "http://embedding-api:9000/embed"
 
+# Sliding window config
+CHUNK_SIZE = 200   # number of words per chunk
+CHUNK_OVERLAP = 50 # number of words to overlap
+
 # Spark session
 spark = SparkSession.builder \
     .appName("IngestionPipeline") \
@@ -33,7 +37,7 @@ pdf_df = spark.read.format("binaryFile") \
     .select("path", "content")
 
 # -----------------------------------------------------------
-# 2. Extract and chunk PDF text
+# 2. Extract and chunk PDF text using sliding window
 # -----------------------------------------------------------
 @pandas_udf(ArrayType(StructType([
     StructField("chunk_id", StringType()),
@@ -51,15 +55,22 @@ def extract_chunks_udf(contents: pd.Series, paths: pd.Series) -> pd.Series:
                 doc = fitz.open(stream=pdf_file.read(), filetype="pdf")
                 for page_num, page in enumerate(doc, start=1):
                     text = page.get_text("text")
-                    split_chunks = [text[i:i+1000] for i in range(0, len(text), 1000)]
-                    for i, chunk in enumerate(split_chunks):
-                        chunks.append({
-                            "chunk_id": str(uuid.uuid4()),
-                            "source": path.split("/")[-1],
-                            "page_num": page_num,
-                            "chunk_index": i,
-                            "content": chunk
-                        })
+                    words = text.split()
+                    i = 0
+                    chunk_index = 0
+                    while i < len(words):
+                        chunk_words = words[i:i + CHUNK_SIZE]
+                        chunk_text = " ".join(chunk_words)
+                        if chunk_text.strip():
+                            chunks.append({
+                                "chunk_id": str(uuid.uuid4()),
+                                "source": path.split("/")[-1],
+                                "page_num": page_num,
+                                "chunk_index": chunk_index,
+                                "content": chunk_text
+                            })
+                            chunk_index += 1
+                        i += CHUNK_SIZE - CHUNK_OVERLAP
         except Exception as e:
             log.error(f"Failed to parse PDF: {e}")
         all_chunks.append(chunks)

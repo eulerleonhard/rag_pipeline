@@ -2,4 +2,4 @@
 # fastapi
 # uvicorn
 # transformers
-# PyMuPDF
+# requests

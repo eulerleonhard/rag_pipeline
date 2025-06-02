@@ -1,8 +1,7 @@
 import faiss
 import numpy as np
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import pandas_udf, col
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType, FloatType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType
 import os
 
 # Config
@@ -13,16 +12,21 @@ METADATA_PATH = "/app/faiss_index/metadata.parquet"
 spark = SparkSession.builder.appName("FaissIndexBuilder").getOrCreate()
 
 def main():
-    # Load enhanced embeddings parquet (chunk_id, source, page_num, chunk_index, content, embedding)
+    # Load embeddings parquet including chunk_int_id
     df = spark.read.parquet(HDFS_PARQUET_PATH).select(
-        "chunk_id", "source", "page_num", "chunk_index", "content", "embedding"
+        "chunk_id", "chunk_int_id", "source", "page_num", "chunk_index", "content", "embedding"
     )
 
-    # Collect embeddings and metadata locally (assumes manageable size)
     data = df.collect()
+
+    # Extract embeddings and IDs
     embeddings = np.array([row.embedding for row in data]).astype('float32')
+    ids = np.array([row.chunk_int_id for row in data]).astype('int64')
+
+    # Extract metadata (include chunk_int_id)
     metadata = [{
         "chunk_id": row.chunk_id,
+        "chunk_int_id": row.chunk_int_id,
         "source": row.source,
         "page_num": row.page_num,
         "chunk_index": row.chunk_index,
@@ -32,17 +36,28 @@ def main():
     # Ensure target directory exists
     os.makedirs(os.path.dirname(FAISS_INDEX_PATH), exist_ok=True)
 
-    # Build FAISS index (Flat L2)
     dim = embeddings.shape[1]
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
 
-    # Save index to disk
+    # Load existing index if available, else create new
+    if os.path.exists(FAISS_INDEX_PATH):
+        index = faiss.read_index(FAISS_INDEX_PATH)
+        # Wrap with ID map if not already
+        if not isinstance(index, faiss.IndexIDMap):
+            index = faiss.IndexIDMap(index)
+    else:
+        flat_index = faiss.IndexFlatL2(dim)
+        index = faiss.IndexIDMap(flat_index)
+
+    # Add new vectors with their IDs
+    index.add_with_ids(embeddings, ids)
+
+    # Save updated index
     faiss.write_index(index, FAISS_INDEX_PATH)
 
-    # Save metadata with Spark for retrieval
+    # Save metadata including chunk_int_id
     meta_schema = StructType([
         StructField("chunk_id", StringType()),
+        StructField("chunk_int_id", LongType()),
         StructField("source", StringType()),
         StructField("page_num", IntegerType()),
         StructField("chunk_index", IntegerType()),

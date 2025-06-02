@@ -1,12 +1,10 @@
 # File retrieval-api/main.py
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
 import requests
 import faiss
 import numpy as np
 import pandas as pd
-import os
 import logging
 
 # Setup logging
@@ -35,6 +33,8 @@ except Exception as e:
 try:
     log.info(f"📖 Loading metadata from {METADATA_PATH}")
     metadata_df = pd.read_parquet(METADATA_PATH)
+    # Set index on chunk_int_id for fast lookup by ID
+    metadata_df.set_index("chunk_int_id", inplace=True)
 except Exception as e:
     log.error(f"❌ Failed to load metadata: {e}")
     raise RuntimeError("Metadata file could not be loaded")
@@ -53,8 +53,8 @@ def search(req: QueryRequest):
 
     # Step 2: Search FAISS index
     try:
-        distances, indices = faiss_index.search(query_emb, req.top_k)
-        indices = indices[0]
+        distances, ids = faiss_index.search(query_emb, req.top_k)
+        ids = ids[0]
         distances = distances[0]
     except Exception as e:
         log.error(f"❌ FAISS search failed: {e}")
@@ -62,14 +62,19 @@ def search(req: QueryRequest):
 
     # Step 3: Fetch metadata and construct results
     results = []
-    for i, idx in enumerate(indices):
-        if idx < 0 or idx >= len(metadata_df):
-            log.warning(f"⚠️ Skipping invalid index: {idx}")
+    for rank, faiss_id in enumerate(ids, start=1):
+        if faiss_id < 0:
+            log.warning(f"⚠️ Skipping invalid FAISS id: {faiss_id}")
             continue
-        row = metadata_df.iloc[idx]
+        try:
+            row = metadata_df.loc[faiss_id]
+        except KeyError:
+            log.warning(f"⚠️ Metadata not found for FAISS id: {faiss_id}")
+            continue
+
         results.append({
-            "rank": i + 1,
-            "score": float(distances[i]),
+            "rank": rank,
+            "score": float(distances[rank - 1]),
             "content": row["content"],
             "source": row["source"]
         })

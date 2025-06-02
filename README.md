@@ -41,20 +41,13 @@ rag_app1/
 
 - Place your PDF files in the `data/` directory.
 
-### 2. Build and Start All Services
+### 2. Build and Start Core Services
 
-From the project root:
+Start only the core infrastructure and embedding service first:
 
 ```sh
-docker compose up --build
+docker-compose up -d -scale --spark-worker=2
 ```
-
-This will start:
-- Hadoop HDFS (namenode, datanode)
-- Spark master and worker
-- Embedding API
-- Retrieval API
-- LLM API
 
 ### 3. Ingest Documents and Build Index
 
@@ -82,7 +75,15 @@ This will:
 - Build a FAISS index and metadata
 - Save them to a shared volume for the retrieval API
 
-### 4. Query the RAG Pipeline
+### 4. Start Retrieval and LLM APIs
+
+After the index and metadata are built, start the retrieval and LLM API services:
+
+```sh
+docker-compose up -d retrieval-api llm-api
+```
+
+### 5. Query the RAG Pipeline
 
 **End-to-end answer generation:**
 
@@ -97,8 +98,12 @@ curl -X POST http://localhost:9003/answer \
 ```
 
 - Windows:
+
 ```sh
-Invoke-RestMethod -Uri http://localhost:9003/answer `  -Method Post `  -Body (@{    query = "YOUR QUESTION HERE"    top_k = 3  } | ConvertTo-Json -Depth 10) `  -ContentType "application/json" 
+Invoke-RestMethod -Uri http://localhost:9003/answer `
+  -Method Post `
+  -Body (@{ query = "YOUR QUESTION HERE"; top_k = 3 } | ConvertTo-Json -Depth 10) `
+  -ContentType "application/json"
 ```
 
 You will receive an answer generated using retrieved context from your documents.
@@ -119,6 +124,7 @@ You will receive an answer generated using retrieved context from your documents
 
 - All services communicate over the internal Docker network.
 - For large datasets, ensure your system has enough resources.
+- If you add new data and rebuild the index, you must restart the retrieval-api and llm-api containers to load the latest index and metadata.
 - You can extend the pipeline with a UI or additional data sources.
 
 ---

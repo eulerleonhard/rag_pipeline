@@ -1,12 +1,14 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import pandas_udf, col, explode
-from pyspark.sql.types import StructType, StructField, StringType, IntegerType, ArrayType, FloatType
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType, ArrayType, FloatType
 import pandas as pd
 import fitz  # PyMuPDF
 import io
 import uuid
 import requests
 import logging
+import hashlib
+import struct
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +30,18 @@ spark = SparkSession.builder \
     .config("spark.hadoop.fs.defaultFS", "hdfs://hadoop-namenode:9000") \
     .getOrCreate()
 
+def uuid_to_int64(u: str) -> int:
+    """
+    Convert UUID string to a signed 64-bit integer by hashing.
+    This ensures Spark LongType compatibility.
+    """
+    h = hashlib.sha256(u.encode('utf-8')).digest()
+    unsigned_val = struct.unpack('>Q', h[:8])[0]
+    if unsigned_val >= 2**63:
+        return unsigned_val - 2**64
+    else:
+        return unsigned_val
+
 # -----------------------------------------------------------
 # 1. Read PDFs from HDFS
 # -----------------------------------------------------------
@@ -41,6 +55,7 @@ pdf_df = spark.read.format("binaryFile") \
 # -----------------------------------------------------------
 @pandas_udf(ArrayType(StructType([
     StructField("chunk_id", StringType()),
+    StructField("chunk_int_id", LongType()),               # New stable int64 ID
     StructField("source", StringType()),
     StructField("page_num", IntegerType()),
     StructField("chunk_index", IntegerType()),
@@ -62,8 +77,10 @@ def extract_chunks_udf(contents: pd.Series, paths: pd.Series) -> pd.Series:
                         chunk_words = words[i:i + CHUNK_SIZE]
                         chunk_text = " ".join(chunk_words)
                         if chunk_text.strip():
+                            cid = str(uuid.uuid4())
                             chunks.append({
-                                "chunk_id": str(uuid.uuid4()),
+                                "chunk_id": cid,
+                                "chunk_int_id": uuid_to_int64(cid),  # Stable int64 ID
                                 "source": path.split("/")[-1],
                                 "page_num": page_num,
                                 "chunk_index": chunk_index,
@@ -81,6 +98,7 @@ chunked_df = pdf_df.withColumn("chunks", extract_chunks_udf(col("content"), col(
     .select(explode(col("chunks")).alias("chunk")) \
     .select(
         col("chunk.chunk_id"),
+        col("chunk.chunk_int_id"),              # include int64 ID
         col("chunk.source"),
         col("chunk.page_num"),
         col("chunk.chunk_index"),

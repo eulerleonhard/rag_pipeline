@@ -44,7 +44,7 @@ class FullQueryRequest(BaseModel):
 def build_prompt(query: str, contexts: List[str]) -> str:
     context_block = "\n".join(f"- {c}" for c in contexts)
     return (
-        "Answer the question based on the context below.\n\n"
+        "Answer the question based on the context below about coverage, capacity and load balancing (CCO-LB) problem in Sefl Optimization Networks (SON).\n\n"
         f"Context:\n{context_block}\n\n"
         f"Question: {query}\nAnswer:"
     )

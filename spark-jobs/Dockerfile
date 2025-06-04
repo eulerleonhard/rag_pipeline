@@ -13,4 +13,4 @@ RUN apt-get update && \
         requests \
         faiss-cpu
 
-USER 1001
+USER 1000

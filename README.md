@@ -134,9 +134,3 @@ You will receive an answer generated using retrieved context from your documents
 - Check logs for each service using `docker compose logs <service-name>` or `docker-compose logs -f <service-name>`.
 - Ensure your PDFs are readable and not encrypted.
 - If you change code, rebuild the affected service with `docker compose build <service-name>`.
-
----
-
-## License
-
-VIETTEL
